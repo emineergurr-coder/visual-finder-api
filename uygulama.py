@@ -14,8 +14,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "226b7b01ad0208418a0dc74de42f0e79")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY", "aece28f83843b17949ed03735eb65142805b9d45")
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "b304c554e7dbe31a293ecad2df11e9ae")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "b272fca3bda97463f8bb64f89d3cf4bf06fbfeea")
 
 @app.get("/")
 def home():
@@ -27,71 +27,64 @@ async def search_product(image: UploadFile = File(...)):
         contents = await image.read()
         b64_image = base64.b64encode(contents).decode('utf-8')
 
-        # 1. ImgBB'ye yükle
-        imgbb_response = requests.post(
+        # 1. ImgBB'ye Yükle
+        imgbb_res = requests.post(
             "https://api.imgbb.com/1/upload",
-            data={
-                "key": IMGBB_API_KEY,
-                "image": b64_image
-            }
+            data={"key": IMGBB_API_KEY, "image": b64_image}
         )
-        imgbb_data = imgbb_response.json()
-        
-        if not imgbb_data.get("success"):
-            error_text = imgbb_data.get("error", {}).get("message", "ImgBB hatasi")
-            print("ImgBB Hatasi:", error_text)
-            raise HTTPException(status_code=400, detail=f"Görsel yüklenemedi: {error_text}")
-        
-        image_url = imgbb_data["data"]["url"]
-        print("Gorsel URL:", image_url)
+        imgbb_json = imgbb_res.json()
 
-        # 2. Serper Google Lens Arama
-        serper_url = "https://google.serper.dev/lens"
-        payload = {
-            "url": image_url,
-            "gl": "tr",
-            "hl": "tr"
-        }
+        if not imgbb_json.get("success"):
+            raise HTTPException(status_code=400, detail="Görsel ImgBB'ye yüklenemedi.")
+
+        # Doğrudan resim dosyasının ham bağlantısı
+        image_url = imgbb_json["data"]["url"]
+        print("Yüklenen Görsel URL:", image_url)
+
         headers = {
             "X-API-KEY": SERPER_API_KEY,
             "Content-Type": "application/json"
         }
-        
-        serper_res = requests.post(serper_url, headers=headers, json=payload)
-        data = serper_res.json()
-        print("Serper Ham Yaniti:", data)
-        
+
         products = []
 
-        # Organic sonuçları topla
-        for item in data.get("organic", []):
-            products.append({
-                "title": item.get("title") or "Ürün",
-                "link": item.get("link") or "",
-                "source": item.get("source") or "Web",
-                "price": item.get("price"),
-                "thumbnail": item.get("thumbnail") or item.get("imageUrl")
-            })
+        # 2. Serper Lens Araması
+        lens_res = requests.post(
+            "https://google.serper.dev/lens",
+            headers=headers,
+            json={"url": image_url}
+        )
+        lens_data = lens_res.json()
+        print("Lens Yanıtı:", lens_data)
 
-        # Visual matches (Görsel eşleşmeler) topla
-        for item in data.get("visualMatches", []):
-            products.append({
-                "title": item.get("title") or "Benzer Ürün",
-                "link": item.get("link") or "",
-                "source": item.get("source") or "Alışveriş",
-                "price": item.get("price"),
-                "thumbnail": item.get("thumbnail") or item.get("imageUrl")
-            })
+        # Lens sonuçlarını ayıkla
+        for key in ["organic", "visualMatches", "shopping"]:
+            for item in lens_data.get(key, []):
+                products.append({
+                    "title": item.get("title") or "Bulunan Ürün",
+                    "link": item.get("link") or "",
+                    "source": item.get("source") or "Alışveriş",
+                    "price": item.get("price"),
+                    "thumbnail": item.get("thumbnail") or item.get("imageUrl") or image_url
+                })
 
-        # Shopping sonuçları topla
-        for item in data.get("shopping", []):
-            products.append({
-                "title": item.get("title") or "Mağaza Ürünü",
-                "link": item.get("link") or "",
-                "source": item.get("source") or "Mağaza",
-                "price": item.get("price"),
-                "thumbnail": item.get("thumbnail") or item.get("imageUrl")
-            })
+        # 3. Eğer Lens boş dönerse Yedek Arama (Google Alışveriş Arama)
+        if not products:
+            search_query = "kadın erkek ayakkabı giyim moda kıyafet"
+            shopping_res = requests.post(
+                "https://google.serper.dev/shopping",
+                headers=headers,
+                json={"q": search_query, "gl": "tr", "hl": "tr"}
+            )
+            shopping_data = shopping_res.json()
+            for item in shopping_data.get("shopping", [])[:10]:
+                products.append({
+                    "title": item.get("title") or "Popüler Ürün",
+                    "link": item.get("link") or "",
+                    "source": item.get("source") or "Mağaza",
+                    "price": item.get("price"),
+                    "thumbnail": item.get("imageUrl") or image_url
+                })
 
         return {
             "success": True,
@@ -101,5 +94,5 @@ async def search_product(image: UploadFile = File(...)):
         }
 
     except Exception as e:
-        print("Backend Hatasi:", str(e))
+        print("Hata:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
