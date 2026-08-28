@@ -1,5 +1,4 @@
 import os
-import base64
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +13,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "b304c554e7dbe31a293ecad2df11e9ae")
+# Kendi yeni ImgBB ve Serper anahtarlarınızı buraya yazın
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "143724ca78fb5e2d2af4cc6679c6188a")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "b272fca3bda97463f8bb64f89d3cf4bf06fbfeea")
 
 @app.get("/")
@@ -25,22 +25,27 @@ def home():
 async def search_product(image: UploadFile = File(...)):
     try:
         contents = await image.read()
-        b64_image = base64.b64encode(contents).decode('utf-8')
 
-        # 1. ImgBB'ye Yükle
-        imgbb_res = requests.post(
-            "https://api.imgbb.com/1/upload",
-            data={"key": IMGBB_API_KEY, "image": b64_image}
-        )
+        # 1. ImgBB'ye Doğrudan Multipart Dosya Olarak Yükle
+        files = {
+            'image': (image.filename or 'upload.jpg', contents, image.content_type or 'image/jpeg')
+        }
+        params = {
+            'key': IMGBB_API_KEY
+        }
+
+        imgbb_res = requests.post("https://api.imgbb.com/1/upload", params=params, files=files)
         imgbb_json = imgbb_res.json()
 
         if not imgbb_json.get("success"):
-            raise HTTPException(status_code=400, detail="Görsel ImgBB'ye yüklenemedi.")
+            error_detail = imgbb_json.get("error", {}).get("message", "ImgBB bilinmeyen hata")
+            print(f"ImgBB Hatası: {error_detail}")
+            raise HTTPException(status_code=400, detail=f"Görsel ImgBB'ye yüklenemedi: {error_detail}")
 
-        # Doğrudan resim dosyasının ham bağlantısı
         image_url = imgbb_json["data"]["url"]
         print("Yüklenen Görsel URL:", image_url)
 
+        # 2. Serper Lens Araması
         headers = {
             "X-API-KEY": SERPER_API_KEY,
             "Content-Type": "application/json"
@@ -48,16 +53,13 @@ async def search_product(image: UploadFile = File(...)):
 
         products = []
 
-        # 2. Serper Lens Araması
         lens_res = requests.post(
             "https://google.serper.dev/lens",
             headers=headers,
             json={"url": image_url}
         )
         lens_data = lens_res.json()
-        print("Lens Yanıtı:", lens_data)
 
-        # Lens sonuçlarını ayıkla
         for key in ["organic", "visualMatches", "shopping"]:
             for item in lens_data.get(key, []):
                 products.append({
@@ -68,13 +70,12 @@ async def search_product(image: UploadFile = File(...)):
                     "thumbnail": item.get("thumbnail") or item.get("imageUrl") or image_url
                 })
 
-        # 3. Eğer Lens boş dönerse Yedek Arama (Google Alışveriş Arama)
+        # 3. Sonuç boşsa Alışveriş Arama motorunu devreye sok
         if not products:
-            search_query = "kadın erkek ayakkabı giyim moda kıyafet"
             shopping_res = requests.post(
                 "https://google.serper.dev/shopping",
                 headers=headers,
-                json={"q": search_query, "gl": "tr", "hl": "tr"}
+                json={"q": "kadın erkek ayakkabı giyim moda kıyafet", "gl": "tr", "hl": "tr"}
             )
             shopping_data = shopping_res.json()
             for item in shopping_data.get("shopping", [])[:10]:
@@ -93,6 +94,8 @@ async def search_product(image: UploadFile = File(...)):
             "data": products
         }
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print("Hata:", str(e))
+        print("Genel Sunucu Hatası:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
