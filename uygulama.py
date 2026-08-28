@@ -13,8 +13,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Kendi yeni ImgBB ve Serper anahtarlarınızı buraya yazın
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "143724ca78fb5e2d2af4cc6679c6188a")
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "b304c554e7dbe31a293ecad2df11e9ae")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "b272fca3bda97463f8bb64f89d3cf4bf06fbfeea")
 
 @app.get("/")
@@ -26,26 +25,34 @@ async def search_product(image: UploadFile = File(...)):
     try:
         contents = await image.read()
 
-        # 1. ImgBB'ye Doğrudan Multipart Dosya Olarak Yükle
-        files = {
-            'image': (image.filename or 'upload.jpg', contents, image.content_type or 'image/jpeg')
-        }
-        params = {
-            'key': IMGBB_API_KEY
-        }
-
-        imgbb_res = requests.post("https://api.imgbb.com/1/upload", params=params, files=files)
+        # 1. ImgBB'ye doğrudan dosya (multipart) olarak yükle
+        imgbb_res = requests.post(
+            f"https://api.imgbb.com/1/upload?key={IMGBB_API_KEY}",
+            files={"image": (image.filename or "upload.jpg", contents)}
+        )
         imgbb_json = imgbb_res.json()
+        print("ImgBB Cevabi:", imgbb_json)
 
-        if not imgbb_json.get("success"):
-            error_detail = imgbb_json.get("error", {}).get("message", "ImgBB bilinmeyen hata")
-            print(f"ImgBB Hatası: {error_detail}")
-            raise HTTPException(status_code=400, detail=f"Görsel ImgBB'ye yüklenemedi: {error_detail}")
+        image_url = None
+        if imgbb_json.get("success"):
+            image_url = imgbb_json["data"]["url"]
+        else:
+            # ImgBB kotası biterse alternatif ücretsiz yükleyici (FreeImage.host)
+            alt_res = requests.post(
+                "https://freeimage.host/api/1/upload",
+                data={"key": "6d207e02198a847aa98d0a2a901485a5", "action": "upload"},
+                files={"source": (image.filename or "upload.jpg", contents)}
+            )
+            alt_json = alt_res.json()
+            if alt_json.get("status_code") == 200:
+                image_url = alt_json["image"]["url"]
 
-        image_url = imgbb_json["data"]["url"]
-        print("Yüklenen Görsel URL:", image_url)
+        if not image_url:
+            error_detail = imgbb_json.get("error", {}).get("message", "Görsel sunucuya yüklenemedi.")
+            raise HTTPException(status_code=400, detail=f"Görsel yüklenemedi: {error_detail}")
 
-        # 2. Serper Lens Araması
+        print("Basariyla Yuklenen Gorsel URL:", image_url)
+
         headers = {
             "X-API-KEY": SERPER_API_KEY,
             "Content-Type": "application/json"
@@ -53,12 +60,14 @@ async def search_product(image: UploadFile = File(...)):
 
         products = []
 
+        # 2. Serper Lens Araması
         lens_res = requests.post(
             "https://google.serper.dev/lens",
             headers=headers,
             json={"url": image_url}
         )
         lens_data = lens_res.json()
+        print("Lens Yaniti:", lens_data)
 
         for key in ["organic", "visualMatches", "shopping"]:
             for item in lens_data.get(key, []):
@@ -70,17 +79,17 @@ async def search_product(image: UploadFile = File(...)):
                     "thumbnail": item.get("thumbnail") or item.get("imageUrl") or image_url
                 })
 
-        # 3. Sonuç boşsa Alışveriş Arama motorunu devreye sok
+        # 3. Sonuç boşsa genel alışveriş arama desteği
         if not products:
             shopping_res = requests.post(
                 "https://google.serper.dev/shopping",
                 headers=headers,
-                json={"q": "kadın erkek ayakkabı giyim moda kıyafet", "gl": "tr", "hl": "tr"}
+                json={"q": "trend kıyafet ayakkabı moda", "gl": "tr", "hl": "tr"}
             )
             shopping_data = shopping_res.json()
             for item in shopping_data.get("shopping", [])[:10]:
                 products.append({
-                    "title": item.get("title") or "Popüler Ürün",
+                    "title": item.get("title") or "Önerilen Ürün",
                     "link": item.get("link") or "",
                     "source": item.get("source") or "Mağaza",
                     "price": item.get("price"),
@@ -95,7 +104,8 @@ async def search_product(image: UploadFile = File(...)):
         }
 
     except HTTPException as he:
+        print("HTTP Hatasi:", str(he.detail))
         raise he
     except Exception as e:
-        print("Genel Sunucu Hatası:", str(e))
+        print("Genel Hata:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
