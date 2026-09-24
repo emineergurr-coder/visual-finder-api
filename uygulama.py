@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Visual Finder API")
 
+# CORS ayarları
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,39 +14,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# API anahtarları (Güvenlik için Environment Variable öncelikli)
 IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "b304c554e7dbe31a293ecad2df11e9ae")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "b272fca3bda97463f8bb64f89d3cf4bf06fbfeea")
+FREEIMAGE_API_KEY = os.getenv("FREEIMAGE_API_KEY", "6d207e02198a847aa98d0a2a901485a5")
+
 
 @app.get("/")
 def home():
     return {"status": "online", "message": "Visual Finder API calisiyor"}
 
+
 @app.post("/search-product")
 async def search_product(image: UploadFile = File(...)):
     try:
         contents = await image.read()
+        file_name = image.filename or "upload.jpg"
 
-        # 1. ImgBB'ye doğrudan dosya (multipart) olarak yükle
+        # 1. ImgBB'ye doğrudan görsel yükleme
         imgbb_res = requests.post(
             f"https://api.imgbb.com/1/upload?key={IMGBB_API_KEY}",
-            files={"image": (image.filename or "upload.jpg", contents)}
+            files={"image": (file_name, contents)},
+            timeout=20,
         )
         imgbb_json = imgbb_res.json()
         print("ImgBB Cevabi:", imgbb_json)
 
         image_url = None
         if imgbb_json.get("success"):
-            image_url = imgbb_json["data"]["url"]
+            image_url = imgbb_json.get("data", {}).get("url")
         else:
-            # ImgBB kotası biterse alternatif ücretsiz yükleyici (FreeImage.host)
+            # ImgBB kotası biterse alternatif servis (FreeImage.host)
             alt_res = requests.post(
                 "https://freeimage.host/api/1/upload",
-                data={"key": "6d207e02198a847aa98d0a2a901485a5", "action": "upload"},
-                files={"source": (image.filename or "upload.jpg", contents)}
+                data={"key": FREEIMAGE_API_KEY, "action": "upload"},
+                files={"source": (file_name, contents)},
+                timeout=20,
             )
             alt_json = alt_res.json()
             if alt_json.get("status_code") == 200:
-                image_url = alt_json["image"]["url"]
+                image_url = alt_json.get("image", {}).get("url")
 
         if not image_url:
             error_detail = imgbb_json.get("error", {}).get("message", "Görsel sunucuya yüklenemedi.")
@@ -55,7 +63,7 @@ async def search_product(image: UploadFile = File(...)):
 
         headers = {
             "X-API-KEY": SERPER_API_KEY,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         products = []
@@ -64,7 +72,8 @@ async def search_product(image: UploadFile = File(...)):
         lens_res = requests.post(
             "https://google.serper.dev/lens",
             headers=headers,
-            json={"url": image_url}
+            json={"url": image_url},
+            timeout=20,
         )
         lens_data = lens_res.json()
         print("Lens Yaniti:", lens_data)
@@ -76,7 +85,7 @@ async def search_product(image: UploadFile = File(...)):
                     "link": item.get("link") or "",
                     "source": item.get("source") or "Alışveriş",
                     "price": item.get("price"),
-                    "thumbnail": item.get("thumbnail") or item.get("imageUrl") or image_url
+                    "thumbnail": item.get("thumbnail") or item.get("imageUrl") or image_url,
                 })
 
         # 3. Sonuç boşsa genel alışveriş arama desteği
@@ -84,7 +93,8 @@ async def search_product(image: UploadFile = File(...)):
             shopping_res = requests.post(
                 "https://google.serper.dev/shopping",
                 headers=headers,
-                json={"q": "trend kıyafet ayakkabı moda", "gl": "tr", "hl": "tr"}
+                json={"q": "trend kıyafet ayakkabı moda", "gl": "tr", "hl": "tr"},
+                timeout=20,
             )
             shopping_data = shopping_res.json()
             for item in shopping_data.get("shopping", [])[:10]:
@@ -93,14 +103,14 @@ async def search_product(image: UploadFile = File(...)):
                     "link": item.get("link") or "",
                     "source": item.get("source") or "Mağaza",
                     "price": item.get("price"),
-                    "thumbnail": item.get("imageUrl") or image_url
+                    "thumbnail": item.get("imageUrl") or image_url,
                 })
 
         return {
             "success": True,
             "total_results": len(products),
             "uploaded_url": image_url,
-            "data": products
+            "data": products,
         }
 
     except HTTPException as he:
